@@ -2,18 +2,21 @@ using System.Text;
 
 public enum TokenType { Number, Identifier, FunctionKeyword, PrintKeyword, Plus, Minus, Multiply, Divide, Power, OpenParenthesis, CloseParenthesis, EndOfInput }
 
-public class Token { public TokenType Type { get; } public string Value { get; }
-
-public Token(TokenType type, string value)
+public class Token
 {
-    Type = type;
-    Value = value;
-}
+    public TokenType Type { get; }
+    public string Value { get; }
 
-public override string ToString()
-{
-    return $"Token({Type}, {Value})";
-}
+    public Token(TokenType type, string value)
+    {
+        Type = type;
+        Value = value;
+    }
+
+    public override string ToString()
+    {
+        return $"Token({Type}, {Value})";
+    }
 }
 
 public class Lexer
@@ -27,7 +30,7 @@ public class Lexer
         _position = 0;
     }
 
-    public Token NextToken()    
+    public Token NextToken()
     {
         while (_position < _input.Length)
         {
