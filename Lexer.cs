@@ -1,6 +1,6 @@
 using System.Text;
 
-public enum TokenType { Number, Identifier, FunctionKeyword, PrintKeyword, Plus, Minus, Multiply, Divide, Power, OpenParenthesis, CloseParenthesis, EndOfInput }
+public enum TokenType { Number, Identifier, FunctionKeyword, PrintKeyword, Plus, Minus, Multiply, Divide, Power, OpenParenthesis, CloseParenthesis, Comma, EndOfInput }
 
 public class Token
 {
@@ -62,6 +62,12 @@ public class Lexer
             {
                 _position++;
                 return new Token(TokenType.CloseParenthesis, ")");
+            }
+
+            if (currentChar == ',')
+            {
+                _position++;
+                return new Token(TokenType.Comma, ",");
             }
 
             if (IsOperator(currentChar))

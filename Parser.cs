@@ -49,7 +49,7 @@ public class Parser
 
     private Node ParseFunctionCall()
     {
-        var identifier = ParseIdentifier();
+        var identifier = (IdentifierNode)ParseIdentifier();
         ConsumeToken(TokenType.OpenParenthesis);
         var arguments = ParseArgumentList().ToArray();
         ConsumeToken(TokenType.CloseParenthesis);
@@ -78,6 +78,8 @@ public class Parser
         return new IdentifierNode(token.Value);
     }
 
+    private bool IsExpression() { return IsFunctionCall() || IsNumber() || IsIdentifier() || IsParenthesizedExpression(); }
+
     private bool IsBinaryOperation()
     {
         if (!IsExpression())
@@ -102,7 +104,10 @@ public class Parser
     private Node ParseBinaryOperation()
     {
         var left = ParseExpression();
-        var token = ConsumeToken(TokenCategory.Operator);
+
+        // This line has been changed to use direct token type checks instead of TokenCategory.
+        var token = ConsumeToken(TokenType.Plus, TokenType.Minus, TokenType.Multiply, TokenType.Divide, TokenType.Power);
+
         var right = ParseExpression();
         return new BinaryOperationNode(token.Type, left, right);
     }
@@ -141,7 +146,7 @@ public class Parser
     {
         if (_position >= _tokens.Count)
         {
-            return new Token("", TokenType.EndOfInput);
+            return new Token(TokenType.EndOfInput, "");
         }
 
         return _tokens[_position];
@@ -151,7 +156,7 @@ public class Parser
     {
         if (_position + 1 >= _tokens.Count)
         {
-            return new Token("", TokenType.EndOfInput);
+            return new Token(TokenType.EndOfInput, "");
         }
 
         return _tokens[_position + 1];
@@ -164,6 +169,20 @@ public class Parser
         if (token.Type != type)
         {
             throw new Exception($"Expected {type}, but found {token.Type}.");
+        }
+
+        _position++;
+        return token;
+    }
+
+    private Token ConsumeToken(params TokenType[] tokenTypes)
+    {
+        var token = PeekToken();
+
+        if (!tokenTypes.Contains(token.Type))
+        {
+            var expectedTokens = string.Join(", ", tokenTypes.Select(tt => tt.ToString()));
+            throw new Exception($"Expected one of [{expectedTokens}], but found {token.Type}.");
         }
 
         _position++;
