@@ -1,178 +1,426 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
-using System.IO;
 
 public class CodeGenerator
 {
-    public static void Generate(Node rootNode, string outputFileName)
+    private readonly MetadataBuilder _metadataBuilder;
+    private readonly BlobBuilder _ilBuilder;
+    private readonly Dictionary<string, MethodDefinitionHandle> _functionTable;
+
+    public CodeGenerator()
     {
-        // Step 1: Set up the metadata builder and blob builder for creating the .NET assembly.
+        // Create new metadata and IL builders.
+        _metadataBuilder = new MetadataBuilder();
+        _ilBuilder = new BlobBuilder();
 
-        var metadataBuilder = new MetadataBuilder();
-        var ilBuilder = new BlobBuilder();
-
-        metadataBuilder.AddAssembly(
-            metadataBuilder.GetOrAddString(outputFileName),
-            new Version(1, 0, 0, 0),
-            metadataBuilder.GetOrAddString(""),
-            publicKeyOrToken: default,
-            flags: AssemblyFlags.None,
-            hashAlgorithm: AssemblyHashAlgorithm.Sha1);
-
-        // Step 2: Define the main method inside a new class.
-
-        var programType = metadataBuilder.AddTypeDefinition(
-            TypeAttributes.Public | TypeAttributes.Class | TypeAttributes.Sealed | TypeAttributes.AnsiClass,
-            metadataBuilder.GetOrAddString("ExpressionCompiler"),
-            metadataBuilder.GetOrAddString("Program"),
-            baseType: metadataBuilder.GetOrAddTypeSpecification(
-                metadataBuilder.GetOrAddTypeReference(
-                    metadataBuilder.GetOrAddAssemblyReference(
-                        metadataBuilder.GetOrAddString("mscorlib"),
-                        new Version(4, 0, 0, 0),
-                        default,
-                        publicKeyOrToken: default,
-                        default,
-                        AssemblyFlags.PublicKey),
-                    metadataBuilder.GetOrAddString("System.Object"))));
-
-        var mainMethod = metadataBuilder.AddMethodDefinition(
-            MethodAttributes.Public | MethodAttributes.Static,
-            MethodImplAttributes.IL | MethodImplAttributes.Managed,
-            metadataBuilder.GetOrAddString("Main"),
-            metadataBuilder.GetOrAddBlob(new BlobBuilder().MethodSignature(
-                CallingConvention.Default,
-                0,
-                metadataBuilder.GetOrAddType(metadataBuilder.GetOrAddString("System.Void")),
-                new[] { metadataBuilder.GetOrAddType(metadataBuilder.GetOrAddString("System.String[]")) })),
-            0);
-
-        var methodBody = new MethodBodyStreamEncoder(ilBuilder);
-        var il = new InstructionEncoder(ilBuilder, methodBody);
-
-        // Step 3: Emit IL instructions based on the parse tree.
-
-        EmitNode(rootNode, il);
-
-        il.OpCode(ILOpCode.Ret);
-
-        var methodBodyOffset = methodBody.AddMethodBody(il);
-        metadataBuilder.AddMethodBody(mainMethod, methodBodyOffset);
-
-        // Step 4: Write the assembly to disk.
-
-        using var peStream = File.Create(outputFileName);
-        WritePEImage(peStream, metadataBuilder, ilBuilder, mainMethod);
+        // Create function table to store function definitions.
+        _functionTable = new Dictionary<string, MethodDefinitionHandle>();
     }
 
-    private static void EmitNode(Node node, InstructionEncoder il)
+    public byte[] Generate(Node rootNode)
     {
-        switch (node)
+        // Define a new module and assembly.
+        AddAssembly("MathematicalExpressionLanguage");
+
+        // Define the program type.
+        var programType = DefineType("Program", TypeAttributes.Public | TypeAttributes.Class);
+
+        // Define the program's entry point method.
+        var entryPointMethod = DefineMethod(programType, "Main", MethodAttributes.Public | MethodAttributes.Static, _metadataBuilder.GetOrAddBlob(MetadataTokens.SignatureHeader.GetOrCreate(SignatureKind.Method).PrefixSize(2).UInt16(0x2A).UInt16(0x01).Blob));
+        _metadataBuilder.SetEntryPoint(entryPointMethod);
+
+        // Generate IL for the program.
+        Generate(rootNode, entryPointMethod);
+
+        // Emit the IL into the metadata and create the final PE image.
+        var entryPointHandle = GetMethodHandle(entryPointMethod);
+        var peBuilder = new ManagedPEBuilder(new PEHeaderBuilder(), new MetadataRootBuilder(_metadataBuilder), _ilBuilder, entryPointHandle);
+        var peBlob = new BlobBuilder();
+        var contentIdProvider = new BlobContentIdProvider(new Guid("53AFEF17-CCB0-491B-9BD3-329A7F1AD619"), new byte[] { 0x01, 0x02, 0x03, 0x04 });
+        var peContentId = peBuilder.Serialize(peBlob, contentIdProvider.GetId);
+
+        return peBlob.ToArray();
+    }
+
+    private void AddAssembly(string name)
+    {
+        // Add the assembly definition to the metadata.
+        _metadataBuilder.AddAssembly(
+            _metadataBuilder.GetOrAddString(name),
+            new Version(1, 0, 0, 0),
+            default(StringHandle),
+            default(BlobHandle),
+            flags: AssemblyFlags.None,
+            hashAlgorithm: AssemblyHashAlgorithm.Sha1);
+    }
+
+    private TypeDefinitionHandle DefineType(string name, TypeAttributes attributes)
+    {
+        // Define a new type in the metadata.
+        return _metadataBuilder.AddTypeDefinition(
+            attributes,
+            _metadataBuilder.GetOrAddString(""),
+            _metadataBuilder.GetOrAddString(name),
+            baseType: default(EntityHandle));
+    }
+
+    private MethodDefinitionHandle DefineMethod(TypeDefinitionHandle type, string name, MethodAttributes attributes, BlobHandle signature)
+    {
+        // Define a new method in the metadata.
+        return _metadataBuilder.AddMethodDefinition(
+            attributes,
+            MethodImplAttributes.IL,
+            _metadataBuilder.GetOrAddString(name),
+            signature,
+            methodBody: _ilBuilder.Count,
+            parameterList: default(ParameterHandle),
+            type);
+    }
+
+    private void Generate(Node node, MethodDefinitionHandle method)
+    {
+        if (node is NumberNode numberNode)
         {
-            case NumberNode numberNode:
-                il.LoadConstant(numberNode.Value);
-                break;
+            // Generate IL to push a constant value onto the stack.
+            _ilBuilder.Emit(OpCodes.Ldc_I4, numberNode.Value);
+        }
+        else if (node is BinaryOperationNode binaryOperationNode)
+        {
+            // Generate IL to evaluate the left and right operands.
+            Generate(binaryOperationNode.Left, method);
+            Generate(binaryOperationNode.Right, method);
 
-            case BinaryOperationNode binaryOperationNode:
-                EmitNode(binaryOperationNode.Left, il);
-                EmitNode(binaryOperationNode.Right, il);
+            // Generate IL to perform the binary operation.
+            switch (binaryOperationNode.Operator)
+            {
+                case TokenType.Plus:
+                    _ilBuilder.Emit(OpCodes.Add);
+                    break;
+                case TokenType.Minus:
+                    _ilBuilder.Emit(OpCodes.Sub);
+                    break;
+                case TokenType.Multiply:
+                    _ilBuilder.Emit(OpCodes.Mul);
+                    break;
+                case TokenType.Divide:
+                    _ilBuilder.Emit(OpCodes.Div);
+                    break;
+                case TokenType.Power:
+                    _ilBuilder.Emit(OpCodes.Call, GetMethodHandle(typeof(Math).GetMethod("Pow", new[] { typeof(double), typeof(double) })));
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(binaryOperationNode));
+            }
+        }
+        else if (node is IdentifierNode identifierNode)
+        {
+            // Look up the value of the identifier and generate IL to push it onto the stack.
+            if (_functionTable.TryGetValue(identifierNode.Value, out var functionHandle))
+            {
+                // The identifier refers to a function, so call the function.
+                _ilBuilder.Emit(OpCodes.Call, functionHandle);
+            }
+            else
+            {
+                // The identifier refers to a variable, so load it from the local variables and push it onto the stack.
+                var localIndex = DefineLocal(typeof(int));
+                _ilBuilder.Emit(OpCodes.Ldloc, localIndex);
+            }
+        }
+        else if (node is FunctionCallNode functionCallNode)
+        {
+            // Generate IL to evaluate the function arguments.
+            foreach (var argumentNode in functionCallNode.Arguments)
+            {
+                Generate(argumentNode, method);
+            }
 
-                switch (binaryOperationNode.Operator)
-                {
-                    case TokenType.Plus:
-                        il.OpCode(ILOpCode.Add);
-                        break;
-
-                    case TokenType.Minus:
-                        il.OpCode(ILOpCode.Sub);
-                        break;
-
-                    case TokenType.Multiply:
-                        il.OpCode(ILOpCode.Mul);
-                        break;
-
-                    case TokenType.Divide:
-                        il.OpCode(ILOpCode.Div);
-                        break;
-
-                    case TokenType.Power:
-                        il.OpCode(ILOpCode.Call);
-                        var mathPowMethodHandle = il.Method(
-                            System.Math.Pow,
-                            isReadOnly: true,
-                            constrainedType: default);
-
-                        il.Token(mathPowMethodHandle, mathPowMethodHandle.GetMethodSignature());
-                        break;
-                }
-
-                break;
-
-            case ParenthesizedExpressionNode parenthesizedExpressionNode:
-                EmitNode(parenthesizedExpressionNode.Expression, il);
-                break;
-
-            case IdentifierNode identifierNode:
-                throw new NotImplementedException("Identifier evaluation not implemented.");
-
-            case FunctionCallNode functionCallNode:
-                foreach (var argument in functionCallNode.Arguments)
-                {
-                    EmitNode(argument, il);
-                }
-
-                switch (functionCallNode.Identifier)
-                {
-                    case "print!":
-                        il.OpCode(ILOpCode.Call);
-                        var consoleWriteLineMethodHandle = il.Method(
-                            typeof(Console).GetMethod(nameof(Console.WriteLine), new[] { typeof(string) }),
-                            isReadOnly: false,
-                            constrainedType: default);
-
-                        il.Token(consoleWriteLineMethodHandle, consoleWriteLineMethodHandle.GetMethodSignature());
-                        break;
-
-                    default:
-                        throw new NotImplementedException($"Function {functionCallNode.Identifier} not implemented.");
-                }
-
-                break;
-
-            default:
-                throw new NotImplementedException($"Node of type {node.GetType()} not implemented.");
+            // Look up the handle for the function and generate IL to call it.
+            if (_functionTable.TryGetValue(functionCallNode.Identifier, out var functionHandle))
+            {
+                _ilBuilder.Emit(OpCodes.Call, functionHandle);
+            }
+            else
+            {
+                throw new ArgumentException($"Function '{functionCallNode.Identifier}' not found.");
+            }
+        }
+        else if (node is ParenthesizedExpressionNode parenthesizedExpressionNode)
+        {
+            // Generate IL to evaluate the parenthesized expression.
+            Generate(parenthesizedExpressionNode.Expression, method);
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(node));
         }
     }
 
-    private static void WritePEImage(Stream peStream, MetadataBuilder metadataBuilder, BlobBuilder ilBuilder, MethodDefinitionHandle entryPointHandle)
+    private int DefineLocal(Type type)
     {
-        var peHeaderBuilder = new PEHeaderBuilder(
-            PEHeaders.PEHeader.Magic.PE32,
-            PEHeaders.PEHeader.Machine.I386,
-            new System.Collections.Immutable.PEHeaderBuilder(
-                imageCharacteristics: Characteristics.ExecutableImage,
-                majorLinkerVersion: 5,
-                minorLinkerVersion: 0,
-                systemVersion: new Version(5, 1),
-                fileSize: ilBuilder.Count + metadataBuilder.GetMetadataBlobBuilder().Count + 128,
-                timestamp: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                formatVersion: new Version(2, 0)
-            ));
+        // Define a new local variable and return its index.
+        var localIndex = _ilBuilder.Count;
+        _ilBuilder.LocalSignature()
+            .Byte(0x07) // local variable type (element type value 7 = int32)
+            .EndParameters();
+        _ilBuilder.Emit(OpCodes.Stloc, localIndex);
+        _ilBuilder.Emit(OpCodes.Ldloc, localIndex);
 
-        var peBuilder = new ManagedPEBuilder(
-            peHeaderBuilder,
-            new MetadataRootBuilder(metadataBuilder),
-            ilBuilder,
-            entryPoint: entryPointHandle,
-            flags: new CorFlags(isILOnly: true, requires32Bit: true, strongNameSigned: false, trackDebugData: true),
-            deterministicIdProvider: persistentIdentifier => BlobContentId.FromHash(persistentIdentifier));
+        return localIndex;
+    }
 
-        var peBlob = new BlobBuilder();
-        peBuilder.Serialize(peBlob);
+    private MethodDefinitionHandle GetMethodHandle(MethodInfo methodInfo)
+    {
+        // Get the method definition handle for the specified method.
+        var blobBuilder = new BlobBuilder();
+        var parameterCount = methodInfo.GetParameters().Length;
+        var signatureWriter = new SignatureWriter(blobBuilder);
 
-        peBlob.WriteContentTo(peStream);
-        peStream.Flush();
+        signatureWriter.WriteMethodSignature(
+            methodInfo.CallingConvention,
+            returnType => returnType.FromSystemType(methodInfo.ReturnType),
+            parameters =>
+            {
+                for (int i = 0; i < parameterCount; i++)
+                {
+                    var parameterInfo = methodInfo.GetParameters()[i];
+                    parameters.AddParameter().FromSystemType(parameterInfo.ParameterType);
+                }
+            });
+        var methodSignature = _metadataBuilder.GetOrAddBlob(blobBuilder);
+
+        return _metadataBuilder.AddMethodDefinition(
+            MethodAttributes.Public | MethodAttributes.Static,
+            MethodImplAttributes.IL | MethodImplAttributes.Managed,
+            _metadataBuilder.GetOrAddString(methodInfo.Name),
+            methodSignature,
+            MethodBody.None,
+            parameterList: new ParameterHandle[parameterCount],
+            declaringType: GetTypeDefHandle(typeof(Math)));
+    }
+
+    private TypeDefinitionHandle GetTypeDefHandle(Type type)
+    {
+        var typeName = type.FullName.Replace(".", "/");
+        var typeDef = _metadataBuilder.GetTypeDefinition(
+            _metadataBuilder.GetOrAddString(type.Namespace),
+            _metadataBuilder.GetOrAddString(typeName)
+        );
+
+        if (typeDef.IsNil)
+        {
+            typeDef = _metadataBuilder.AddTypeDefinition(
+                new TypeDefinitionAttributes(),
+                _metadataBuilder.GetOrAddString(type.Namespace),
+                _metadataBuilder.GetOrAddString(typeName),
+                GetTypeRefHandle(typeof(object)),
+                default(EntityHandle),
+                Array.Empty<FieldDefinitionHandle>()
+            );
+        }
+
+        return typeDef;
+    }
+
+    private TypeReferenceHandle GetTypeRefHandle(Type type)
+    {
+        string typeName;
+        string namespaceName;
+
+        if (type.IsGenericType)
+        {
+            var nameParts = type.GetGenericTypeDefinition().FullName.Split('.');
+            typeName = string.Join("/", nameParts.Take(nameParts.Length - 1));
+            namespaceName = type.Namespace;
+        }
+        else
+        {
+            typeName = type.FullName?.Replace(".", "/");
+            namespaceName = type.Namespace;
+        }
+
+        // If type is part of mscorlib, use the cached handle.
+        if (type.Assembly == typeof(object).Assembly)
+        {
+            var cacheKey = typeName + namespaceName;
+            if (_typeRefHandleCache.TryGetValue(cacheKey, out var handle))
+            {
+                return handle;
+            }
+        }
+
+        // Create type reference if it does not exist yet.
+        var assemblyRef = _metadataBuilder.AddAssemblyReference(GetAssemblyName(type.Assembly));
+        var typeRef = _metadataBuilder.GetTypeReference(assemblyRef, _metadataBuilder.GetOrAddString(namespaceName), _metadataBuilder.GetOrAddString(typeName));
+
+        if (type.Assembly == typeof(object).Assembly)
+        {
+            var cacheKey = typeName + namespaceName;
+            _typeRefHandleCache[cacheKey] = typeRef;
+        }
+
+        return typeRef;
+    }
+
+    private string GetAssemblyName(Assembly assembly)
+    {
+        var name = assembly.GetName().Name;
+        if (_assemblyNameCache.TryGetValue(name, out var assemblyName))
+        {
+            return assemblyName;
+        }
+
+        var bytes = assembly.GetName().GetPublicKey();
+        if (bytes != null)
+        {
+            assemblyName = _metadataBuilder.GetOrAddAssemblyReference(
+                _metadataBuilder.GetOrAddString(name),
+                new Version(1, 0, 0, 0),
+                _metadataBuilder.GetOrAddString("neutral"),
+                _metadataBuilder.GetOrAddBlob(bytes),
+                flags: default(AssemblyFlags),
+                hashValue: default(BlobHandle)
+            );
+        }
+        else
+        {
+            assemblyName = _metadataBuilder.GetOrAddAssemblyReference(
+                _metadataBuilder.GetOrAddString(name),
+                new Version(1, 0, 0, 0),
+                _metadataBuilder.GetOrAddString("neutral"),
+                publicKeyOrToken: default(BlobHandle),
+                flags: default(AssemblyFlags),
+                hashValue: default(BlobHandle)
+            );
+        }
+
+        _assemblyNameCache[name] = assemblyName;
+        return assemblyName;
+    }
+
+    private void EmitFunctionDefinition(FunctionDefinitionNode node)
+    {
+        var returnType = node.ReturnType ?? typeof(void);
+        var methodName = node.Identifier.Value;
+        var typeDef = GetTypeDefHandle(node.GetType());
+        var methodDef = DefineMethod(
+            typeDef,
+            methodName,
+            MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.Static,
+            GetMethodSignature(returnType, node.ParameterTypes)
+        );
+        Generate(node.Body, methodDef);
+    }
+
+    private BlobHandle GetMethodSignature(Type returnType, Type[] parameterTypes)
+    {
+        var signature = new BlobBuilder();
+        var returnTypeEncoder = new TypeEncoder(signature);
+
+        returnTypeEncoder.Type(returnType);
+
+        var parameters = new ParameterTypeEncoder(signature);
+        parameters.Count(parameterTypes.Length);
+
+        foreach (var parameterType in parameterTypes)
+        {
+            var parameterEncoder = parameters.AddParameter();
+            parameterEncoder.Type(parameterType);
+        }
+
+        return signature.ToBlobHandle();
+    }
+
+    private void EmitPrintStatement(PrintStatementNode node, MethodDefinitionHandle method)
+    {
+        Generate(node.Expression, method);
+        var consoleWriteLine = typeof(Console).GetMethod("WriteLine", new[] { typeof(object) });
+        var consoleWriteLineHandle = GetMethodHandle(consoleWriteLine);
+        _ilBuilder.Emit(OpCodes.Call, consoleWriteLineHandle);
+    }
+
+    private void EmitBinaryOperation(BinaryOperationNode node, MethodDefinitionHandle method)
+    {
+        Generate(node.Left, method);
+        Generate(node.Right, method);
+
+        switch (node.Operator)
+        {
+            case TokenType.Plus:
+                _ilBuilder.Emit(OpCodes.Add);
+                break;
+            case TokenType.Minus:
+                _ilBuilder.Emit(OpCodes.Sub);
+                break;
+            case TokenType.Multiply:
+                _ilBuilder.Emit(OpCodes.Mul);
+                break;
+            case TokenType.Divide:
+                _ilBuilder.Emit(OpCodes.Div);
+                break;
+            case TokenType.Power:
+                var doubleType = GetTypeDefHandle(typeof(double));
+                var mathType = GetTypeDefHandle(typeof(Math));
+                var powMethod = mathType.Resolve().Methods.First(m =>
+                    m.Name == nameof(Math.Pow) && m.Parameters.Count == 2 &&
+                    m.Parameters[0].ParameterType.Name == doubleType.Resolve().Name);
+                var powMethodHandle = GetMethodHandle(powMethod);
+                _ilBuilder.Emit(OpCodes.Call, powMethodHandle);
+                break;
+            default:
+                throw new NotSupportedException($"Operator {node.Operator} is not supported.");
+        }
+    }
+
+    private void EmitParenthesizedExpression(ParenthesizedExpressionNode node, MethodDefinitionHandle method)
+    {
+        Generate(node.Expression, method);
+    }
+
+    private void EmitNumber(NumberNode node, MethodDefinitionHandle method)
+    {
+        _ilBuilder.Emit(OpCodes.Ldc_I4, node.Value);
+    }
+
+    private void EmitIdentifier(string name, MethodDefinitionHandle method)
+    {
+        var variableIndex = DefineLocal(typeof(int));
+        _ilBuilder.Emit(OpCodes.Ldloc, variableIndex);
+    }
+
+    private void EmitAssignment(string name, MethodDefinitionHandle method)
+    {
+        // TODO: Implement assignment.
+        throw new NotImplementedException();
+    }
+
+    private void EmitFunctionCall(FunctionCallNode node, MethodDefinitionHandle method)
+    {
+        var arguments = node.Arguments.Reverse().ToArray();
+
+        foreach (var argument in arguments)
+        {
+            Generate(argument, method);
+        }
+
+        var functionDef = _functionTable[node.Identifier];
+        _ilBuilder.Emit(OpCodes.Call, functionDef);
+    }
+
+    private MethodDefinitionHandle DefineMethod(TypeDefinitionHandle type, string name, MethodAttributes attributes, BlobHandle signature)
+    {
+        var method = _metadataBuilder.AddMethodDefinition(
+            attributes,
+            MethodImplAttributes.IL,
+            _metadataBuilder.GetOrAddString(name),
+            signature,
+            MethodBody.NotInitialized);
+        _metadataBuilder.AddMethodSemantics(method, MethodKind.Ordinary, MethodSemanticsAttributes.None);
+        _metadataBuilder.AddTypeMethod(type, method);
+
+        return method;
     }
 }
