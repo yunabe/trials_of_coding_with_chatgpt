@@ -32,12 +32,19 @@ public class Program
         var sourceCode = File.ReadAllText(inputFile);
 
         // Create lexer and tokenize input
-        var lexer = new Lexer();
-        var tokens = lexer.Tokenize(sourceCode);
+        var lexer = new Lexer(sourceCode);
+        var tokens = new List<Token>();
+        while (true) {
+            var token = lexer.NextToken();
+            tokens.Add(token);
+            if (token.Type == TokenType.EndOfInput) {
+                break;
+            }
+        }
 
         // Create parser and generate parse tree
-        var parser = new Parser();
-        var rootNode = parser.Parse(tokens);
+        var parser = new Parser(tokens);
+        var rootNode = parser.Parse();
 
         // Create code generator and generate code
         var codeGenerator = new CodeGenerator();
